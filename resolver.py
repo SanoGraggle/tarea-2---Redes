@@ -11,9 +11,20 @@ from dnslib import DNSRecord, DNSHeader, DNSQuestion
 ROOT_SERVER_IP = "192.33.4.12"
 DNS_PORT = 53
 
-def resolver(mensaje_consulta):
-    servidor_ip = ROOT_SERVER_IP
+def resolver(mensaje_consulta, debug=False, qname=None, ns_name='.', ns_ip=ROOT_SERVER_IP):
+    servidor_ip = ns_ip
     DNS_PORT = 53
+
+    # Extraer el nombre de dominio si no está definido
+    if qname is None:
+        try:
+            q = DNSRecord.parse(mensaje_consulta)
+            qname = str(q.questions[0].get_qname())
+        except Exception:
+            qname = "?"
+
+    if debug:
+        print(f"(debug) Consultando '{qname}' a '{ns_name}' con dirección IP '{servidor_ip}'")
 
     # 1. Enviar la consulta al servidor actual (inicialmente el root)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -42,47 +53,22 @@ def resolver(mensaje_consulta):
     # 3.i. Si hay IP en Additional, reenviar la query a esa IP
     if additional_ips:
         next_ip = additional_ips[0]
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(5)
-        try:
-            sock.sendto(mensaje_consulta, (next_ip, DNS_PORT))
-            data, _ = sock.recvfrom(4096)
-        except socket.timeout:
-            sock.close()
-            return None
-        sock.close()
-        # Recursivamente procesar la respuesta
-        parsed = parse_dns_message(data)
-        for answer in parsed["answers"]:
-            if answer["type"] == "A":
-                return data
-        # Si no hay respuesta tipo A, repetir el proceso
-        return resolver(mensaje_consulta)
+        if debug and ns_names:
+            print(f"(debug) Consultando '{qname}' a '{ns_names[0]}' con dirección IP '{next_ip}'")
+        return resolver(mensaje_consulta, debug, qname, ns_names[0] if ns_names else '?', next_ip)
 
     # 3.ii. Si no hay IP, resolver el nombre del NS recursivamente
     for ns_name in ns_names:
         ns_query = DNSRecord.question(ns_name).pack()
-        ns_ip_response = resolver(ns_query)
+        ns_ip_response = resolver(ns_query, debug, ns_name, '.', ROOT_SERVER_IP)
         if ns_ip_response:
             ns_ip_parsed = parse_dns_message(ns_ip_response)
             for ans in ns_ip_parsed["answers"]:
                 if ans["type"] == "A":
-                    # Ahora tenemos la IP del NS, reenviamos la consulta original
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock.settimeout(5)
-                    try:
-                        sock.sendto(mensaje_consulta, (ans["rdata"], DNS_PORT))
-                        data, _ = sock.recvfrom(4096)
-                    except socket.timeout:
-                        sock.close()
-                        return None
-                    sock.close()
-                    parsed = parse_dns_message(data)
-                    for answer in parsed["answers"]:
-                        if answer["type"] == "A":
-                            return data
-                    # Si no hay respuesta tipo A, repetir el proceso
-                    return resolver(mensaje_consulta)
+                    ns_ip = ans["rdata"]
+                    if debug:
+                        print(f"(debug) Consultando '{qname}' a '{ns_name}' con dirección IP '{ns_ip}'")
+                    return resolver(mensaje_consulta, debug, qname, ns_name, ns_ip)
 
     # 4. Otro tipo de respuesta: ignorar
     return None
@@ -175,6 +161,6 @@ if __name__ == "__main__":
     print("Esperando mensajes UDP en el puerto 8000...")
     while True:
         data, client_addr = proxy_socket.recvfrom(buffer_size)
-        respuesta = resolver(data)
+        respuesta = resolver(data, debug=True)
         if respuesta:
             proxy_socket.sendto(respuesta, client_addr)
