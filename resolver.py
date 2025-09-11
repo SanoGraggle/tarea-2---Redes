@@ -4,14 +4,60 @@ from dnslib import QTYPE, CLASS
 import dnslib
 from dnslib import DNSRecord 
 
- # Modificar el mensaje de pregunta (opción 1) 
-#dns_query.add_answer(RR(qname, QTYPE.A, rdata=A(ip_answer)))
 
 ROOT_SERVER_IP = "192.33.4.12"
 DNS_PORT = 53
 
+
+cache_history = []  
+cache_counter = {}  
+cache = {}          
+
+def actualizar_cache(qname, ip):
+    
+    cache_history.append(qname)
+    if len(cache_history) > 20:
+        cache_history.pop(0)
+    
+    if qname in cache_counter:
+        cache_counter[qname] += 1
+    else:
+        cache_counter[qname] = 1
+
+    recientes = {}
+    for dom in cache_history:
+        recientes[dom] = recientes.get(dom, 0) + 1
+    top3 = sorted(recientes, key=recientes.get, reverse=True)[:3]
+    for dom in list(cache.keys()):
+        if dom not in top3:
+            del cache[dom]
+    cache[qname] = ip
+
+def construir_respuesta_cache(mensaje_consulta, ip):
+    q = DNSRecord.parse(mensaje_consulta)
+    reply = q.reply()
+    reply.add_answer(
+        dnslib.RR(
+            rname=q.questions[0].qname,
+            rtype=QTYPE.A,
+            rclass=CLASS.IN,
+            ttl=60,
+            rdata=dnslib.A(ip)
+        )
+    )
+    return reply.pack()
+
 def resolver(mensaje_consulta):
-    # Comenzar con el root
+    try:
+        q = DNSRecord.parse(mensaje_consulta)
+        qname = str(q.questions[0].get_qname())
+    except Exception:
+        qname = None
+
+    if qname in cache:
+        print(f"(debug) Respondiendo desde caché para '{qname}' con IP '{cache[qname]}'")
+        return construir_respuesta_cache(mensaje_consulta, cache[qname])
+
     servidor_ip = ROOT_SERVER_IP
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -28,22 +74,20 @@ def resolver(mensaje_consulta):
         qname = parsed["Qname"]
         ns_name = parsed["Authority"][0]["name"] if parsed["Authority"] else None
         print(f"(debug) Consultando '{qname}' a '{ns_name}' con dirección IP '{servidor_ip}'")
-        # Si hay respuesta tipo A en Answer, retornar el mensaje recibido
         for answer in parsed["Answer"]:
             if answer["type"] == "A":
+                ip = answer["rdata"]
+                actualizar_cache(qname, ip)
                 return data
 
-        # Si hay delegación (NS en Authority)
         ns_names = [auth["rdata"] for auth in parsed["Authority"] if auth["type"] == "NS"]
         additional_ips = [add["rdata"] for add in parsed["Additional"] if add["type"] == "A"]
 
-        # Si hay IP en Additional, reenviar la query a esa IP (solo la primera)
         if additional_ips:
             servidor_ip = additional_ips[0]
             print(f"(debug) Consultando a '{servidor_ip}' con nueva IP de Additional: '{additional_ips[0]}'")
             continue
 
-        # Si no hay IP, resolver el nombre del NS recursivamente
         found_ns_ip = False
         for ns_name in ns_names:
             ns_query = DNSRecord.question(ns_name).pack()
@@ -60,25 +104,21 @@ def resolver(mensaje_consulta):
                 break
         if found_ns_ip:
             continue
-        # Si no se pudo resolver, salir
         return None
 
 def parse_dns_message(data):
     d = DNSRecord.parse(data)
     result = {}
 
-    # Qname
     if d.questions:
         result["Qname"] = str(d.questions[0].get_qname())
     else:
         result["Qname"] = None
 
-    # Contadores
     result["ANCOUNT"] = d.header.a
     result["NSCOUNT"] = d.header.auth
     result["ARCOUNT"] = d.header.ar
 
-    # Answer
     result["Answer"] = []
     for rr in d.rr:
         result["Answer"].append({
@@ -89,7 +129,6 @@ def parse_dns_message(data):
             "rdata": str(rr.rdata)
         })
 
-    # Authority
     result["Authority"] = []
     for rr in d.auth:
         result["Authority"].append({
@@ -100,7 +139,6 @@ def parse_dns_message(data):
             "rdata": str(rr.rdata)
         })
 
-    # Additional
     result["Additional"] = []
     for rr in d.ar:
         result["Additional"].append({
@@ -112,25 +150,6 @@ def parse_dns_message(data):
         })
 
     return result
-
-
-def send_dns_message(query_name, address, port):
-    # Acá ya no tenemos que crear el encabezado porque dnslib lo hace por nosotros, por default pregunta por el tipo A
-    qname = query_name
-    q = DNSRecord.question(qname)
-    server_address = (address, port)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # lo enviamos, hacemos cast a bytes de lo que resulte de la función pack() sobre el mensaje
-        sock.sendto(bytes(q.pack()), server_address)
-        # En data quedará la respuesta a nuestra consulta
-        data, _ = sock.recvfrom(4096)
-        # le pedimos a dnslib que haga el trabajo de parsing por nosotros
-        d = DNSRecord.parse(data)
-    finally:
-        sock.close()
-    # Ojo que los datos de la respuesta van en en una estructura de datos
-    return d
 
 
 
