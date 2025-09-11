@@ -2,8 +2,7 @@ import socket
 from dnslib import DNSRecord
 from dnslib import QTYPE, CLASS
 import dnslib
-from dnslib.dns import RR, A
-from dnslib import DNSRecord, DNSHeader, DNSQuestion 
+from dnslib import DNSRecord 
 
  # Modificar el mensaje de pregunta (opción 1) 
 #dns_query.add_answer(RR(qname, QTYPE.A, rdata=A(ip_answer)))
@@ -26,7 +25,9 @@ def resolver(mensaje_consulta):
         sock.close()
 
         parsed = parse_dns_message(data)
-
+        qname = parsed["Qname"]
+        ns_name = parsed["Authority"][0]["name"] if parsed["Authority"] else None
+        print(f"(debug) Consultando '{qname}' a '{ns_name}' con dirección IP '{servidor_ip}'")
         # Si hay respuesta tipo A en Answer, retornar el mensaje recibido
         for answer in parsed["Answer"]:
             if answer["type"] == "A":
@@ -39,6 +40,7 @@ def resolver(mensaje_consulta):
         # Si hay IP en Additional, reenviar la query a esa IP (solo la primera)
         if additional_ips:
             servidor_ip = additional_ips[0]
+            print(f"(debug) Consultando a '{servidor_ip}' con nueva IP de Additional: '{additional_ips[0]}'")
             continue
 
         # Si no hay IP, resolver el nombre del NS recursivamente
@@ -50,6 +52,7 @@ def resolver(mensaje_consulta):
                 ns_ip_parsed = parse_dns_message(ns_ip_response)
                 for ans in ns_ip_parsed["Answer"]:
                     if ans["type"] == "A":
+                        print(f"(debug) Consultando a '{servidor_ip}' con IP resuelta de Authority: '{ans['rdata']}'")
                         servidor_ip = ans["rdata"]
                         found_ns_ip = True
                         break
@@ -134,12 +137,12 @@ def send_dns_message(query_name, address, port):
 if __name__ == "__main__":
     address = ("localhost", 8000)
     buffer_size = 4096
-    proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    proxy_socket.bind(address)
+    dns_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dns_socket.bind(address)
 
-    print("Esperando mensajes UDP en el puerto 8000...")
+    print("Esperando mensajes DNS en el puerto 8000...")
     while True:
-        data, client_addr = proxy_socket.recvfrom(buffer_size)
+        data, client_addr = dns_socket.recvfrom(buffer_size)
         respuesta = resolver(data)
         if respuesta:
-            proxy_socket.sendto(respuesta, client_addr)
+            dns_socket.sendto(respuesta, client_addr)
