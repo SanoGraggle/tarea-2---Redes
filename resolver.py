@@ -12,106 +12,73 @@ ROOT_SERVER_IP = "192.33.4.12"
 DNS_PORT = 53
 
 def resolver(mensaje_consulta):
+    # Comenzar con el root
     servidor_ip = ROOT_SERVER_IP
-    DNS_PORT = 53
-
-    # 1. Enviar la consulta al servidor actual (inicialmente el root)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(5)
-    try:
-        sock.sendto(mensaje_consulta, (servidor_ip, DNS_PORT))
-        data, _ = sock.recvfrom(4096)
-    except socket.timeout:
-        sock.close()
-        return None
-    sock.close()
-
-    parsed = parse_dns_message(data)
-
-    # 2. Si hay respuesta tipo A en Answer, retornar el mensaje recibido
-    for answer in parsed["answers"]:
-        if answer["type"] == "A":
-            return data
-
-    # 3. Si hay delegación (NS en Authority)
-    ns_names = [auth["rdata"] for auth in parsed["authority"] if auth["type"] == "NS"]
-
-    # Buscar IPs en Additional
-    additional_ips = [add["rdata"] for add in parsed["additional"] if add["type"] == "A"]
-
-    # 3.i. Si hay IP en Additional, reenviar la query a esa IP
-    if additional_ips:
-        next_ip = additional_ips[0]
+    while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(5)
         try:
-            sock.sendto(mensaje_consulta, (next_ip, DNS_PORT))
+            sock.sendto(mensaje_consulta, (servidor_ip, DNS_PORT))
             data, _ = sock.recvfrom(4096)
         except socket.timeout:
             sock.close()
             return None
         sock.close()
-        # Recursivamente procesar la respuesta
+
         parsed = parse_dns_message(data)
-        for answer in parsed["answers"]:
+
+        # Si hay respuesta tipo A en Answer, retornar el mensaje recibido
+        for answer in parsed["Answer"]:
             if answer["type"] == "A":
                 return data
-        # Si no hay respuesta tipo A, repetir el proceso
-        return resolver(mensaje_consulta)
 
-    # 3.ii. Si no hay IP, resolver el nombre del NS recursivamente
-    for ns_name in ns_names:
-        ns_query = DNSRecord.question(ns_name).pack()
-        ns_ip_response = resolver(ns_query)
-        if ns_ip_response:
-            ns_ip_parsed = parse_dns_message(ns_ip_response)
-            for ans in ns_ip_parsed["answers"]:
-                if ans["type"] == "A":
-                    # Ahora tenemos la IP del NS, reenviamos la consulta original
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock.settimeout(5)
-                    try:
-                        sock.sendto(mensaje_consulta, (ans["rdata"], DNS_PORT))
-                        data, _ = sock.recvfrom(4096)
-                    except socket.timeout:
-                        sock.close()
-                        return None
-                    sock.close()
-                    parsed = parse_dns_message(data)
-                    for answer in parsed["answers"]:
-                        if answer["type"] == "A":
-                            return data
-                    # Si no hay respuesta tipo A, repetir el proceso
-                    return resolver(mensaje_consulta)
+        # Si hay delegación (NS en Authority)
+        ns_names = [auth["rdata"] for auth in parsed["Authority"] if auth["type"] == "NS"]
+        additional_ips = [add["rdata"] for add in parsed["Additional"] if add["type"] == "A"]
 
-    # 4. Otro tipo de respuesta: ignorar
-    return None
+        # Si hay IP en Additional, reenviar la query a esa IP (solo la primera)
+        if additional_ips:
+            servidor_ip = additional_ips[0]
+            continue
+
+        # Si no hay IP, resolver el nombre del NS recursivamente
+        found_ns_ip = False
+        for ns_name in ns_names:
+            ns_query = DNSRecord.question(ns_name).pack()
+            ns_ip_response = resolver(ns_query)
+            if ns_ip_response:
+                ns_ip_parsed = parse_dns_message(ns_ip_response)
+                for ans in ns_ip_parsed["Answer"]:
+                    if ans["type"] == "A":
+                        servidor_ip = ans["rdata"]
+                        found_ns_ip = True
+                        break
+            if found_ns_ip:
+                break
+        if found_ns_ip:
+            continue
+        # Si no se pudo resolver, salir
+        return None
 
 def parse_dns_message(data):
     d = DNSRecord.parse(data)
-
     result = {}
 
-    # HEADER SECTION
-    result["qr_flag"] = d.header.get_qr()
-    result["QDCOUNT"] = d.header.q
+    # Qname
+    if d.questions:
+        result["Qname"] = str(d.questions[0].get_qname())
+    else:
+        result["Qname"] = None
+
+    # Contadores
     result["ANCOUNT"] = d.header.a
     result["NSCOUNT"] = d.header.auth
     result["ARCOUNT"] = d.header.ar
 
-    # QUERY SECTION
-    result["queries"] = []
-    for q in d.questions:
-        result["queries"].append({
-            "qname": str(q.get_qname()),
-            "qclass": CLASS.get(q.qclass),
-            "qtype": QTYPE.get(q.qtype)
-        })
-
-    # ANSWER SECTION
-    result["answers"] = []
+    # Answer
+    result["Answer"] = []
     for rr in d.rr:
-        result["answers"].append({
+        result["Answer"].append({
             "name": str(rr.rname),
             "type": QTYPE.get(rr.rtype),
             "class": CLASS.get(rr.rclass),
@@ -119,23 +86,21 @@ def parse_dns_message(data):
             "rdata": str(rr.rdata)
         })
 
-    # AUTHORITY SECTION
-    result["authority"] = []
+    # Authority
+    result["Authority"] = []
     for rr in d.auth:
-        rr_dict = {
+        result["Authority"].append({
             "name": str(rr.rname),
             "type": QTYPE.get(rr.rtype),
             "class": CLASS.get(rr.rclass),
             "ttl": rr.ttl,
             "rdata": str(rr.rdata)
-        }
-        # Si es SOA o NS puedes agregar más detalles si quieres
-        result["authority"].append(rr_dict)
+        })
 
-    # ADDITIONAL SECTION
-    result["additional"] = []
+    # Additional
+    result["Additional"] = []
     for rr in d.ar:
-        result["additional"].append({
+        result["Additional"].append({
             "name": str(rr.rname),
             "type": QTYPE.get(rr.rtype),
             "class": CLASS.get(rr.rclass),
